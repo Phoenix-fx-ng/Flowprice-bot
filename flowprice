@@ -1,0 +1,276 @@
+import telebot
+from flask import Flask, request
+import threading
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import time
+
+# === 1. Telegram Bot Setup ===
+TOKEN = "8020705531:AAHK3wd4a46OeKfZXWYdWafXBTbd5I2bZSE"
+bot = telebot.TeleBot(TOKEN)
+user_langs = {}
+user_access = {}  # Tracks usage
+admin_ids = [561234567]  # <-- Replace with your real Telegram ID
+
+ACCESS_LIMIT_DAYS = 3
+ACCESS_LIMIT_SIGNALS = 3
+
+# === 2. Trial & Premium Access Check ===
+def is_allowed(cid):
+    now = time.time()
+    user = user_access.get(cid)
+
+    if user and user.get("premium", False):
+        return True
+
+    if not user:
+        user_access[cid] = {'start_time': now, 'count': 1, 'premium': False, 'notified': False}
+        return True
+
+    elapsed_days = (now - user['start_time']) / (60 * 60 * 24)
+    if elapsed_days <= ACCESS_LIMIT_DAYS and user['count'] < ACCESS_LIMIT_SIGNALS:
+        user['count'] += 1
+        if user['count'] == ACCESS_LIMIT_SIGNALS or int(elapsed_days) >= ACCESS_LIMIT_DAYS - 1:
+            if not user.get("notified"):
+                bot.send_message(cid, "⚠️ *Reminder:* You have only 1 signal or 1 day left in your trial.", parse_mode='Markdown')
+                user['notified'] = True
+        return True
+    return False
+
+# === 3. Language Support ===
+languages = {
+    "en": "🇬🇧 English",
+    "ar": "🇸🇦 العربية",
+    "fr": "🇫🇷 Français"
+}
+
+translations = {
+    "welcome": {
+        "en": "🟢 *Welcome to ChartLess Trading Bot™!*",
+        "ar": "🟢 *مرحبًا بك في بوت شارت-لس للتداول™!*",
+        "fr": "🟢 *Bienvenue sur le bot de trading ChartLess™ !*"
+    },
+    "send_format": {
+        "en": "*Send your data in this format:*\n`Instrument, High, Low, Current`",
+        "ar": "*أرسل البيانات بهذا الشكل:*\n`الأداة، الأعلى، الأدنى، السعر الحالي`",
+        "fr": "*Envoyez vos données dans ce format :*\n`Instrument, Haut, Bas, Actuel`"
+    },
+    "choose_lang": {
+        "en": "🌐 *Please select your language:*",
+        "ar": "🌐 *من فضلك اختر لغتك:*",
+        "fr": "🌐 *Veuillez sélectionner votre langue :*"
+    },
+    "phase_selected": {
+        "en": "✅ *{phase} selected.* Now send: `instrument, high, low, current`\n_(e.g. Phase 1: 29th–2nd)_",
+        "ar": "✅ *{phase} تم اختياره.* الآن أرسل: `الأداة، الأعلى، الأدنى، الحالي`\n_(مثال: المرحلة 1 من 29 إلى 2)_",
+        "fr": "✅ *{phase} sélectionnée.* Envoyez maintenant : `instrument, haut, bas, actuel`\n_(ex : Phase 1 : 29 à 2)_"
+    },
+    "error_format": {
+        "en": "⚠️ Error: Please send like: `instrument, high, low, current`",
+        "ar": "⚠️ خطأ: أرسل مثل هذا: `الأداة، الأعلى، الأدنى، الحالي`",
+        "fr": "⚠️ Erreur : Envoyez comme ceci : `instrument, haut, bas, actuel`"
+    },
+    "not_found": {
+        "en": "⚠️ Error: Instrument not found.",
+        "ar": "⚠️ خطأ: الأداة غير موجودة.",
+        "fr": "⚠️ Erreur : Instrument introuvable."
+    }
+}
+
+def t(key, cid):
+    lang = user_langs.get(cid, "en")
+    return translations[key].get(lang, translations[key]["en"])
+
+# === 4. Instruments & Gaps ===
+instrument_data = {
+    "gold": {"tp": 40, "sl": 13.33, "icon": "🥇"},
+    "audjpy": {"tp": 2, "sl": 0.67, "icon": "🇦🇺/🇯🇵"},
+    "gbpusd": {"tp": 0.02, "sl": 0.0067, "icon": "🇬🇧/🇺🇸"},
+    "nasdaq": {"tp": 600, "sl": 200, "icon": "📊"},
+    "eurusd": {"tp": 0.017, "sl": 0.0057, "icon": "🇪🇺/🇺🇸"},
+    "silver": {"tp": 1.5, "sl": 0.5, "icon": "🥈"},
+    "crudeoil": {"tp": 6, "sl": 2, "icon": "📂"},
+    "usdchf": {"tp": 0.01, "sl": 0.0033, "icon": "🇺🇸/🇨🇭"},
+    "usdjpy": {"tp": 1.8, "sl": 0.6, "icon": "🇺🇸/🇯🇵"},
+    "s&p500": {"tp": 125, "sl": 41.67, "icon": "📈"},
+    "gbpjpy": {"tp": 3, "sl": 1, "icon": "🇬🇧/🇯🇵"},
+    "eurgbp": {"tp": 0.015, "sl": 0.005, "icon": "🇪🇺/🇬🇧"},
+    "btc": {"tp": 1200, "sl": 400, "icon": "₿"},
+}
+
+# === 5. Start Menu ===
+@bot.message_handler(commands=['start'])
+def start(message):
+    cid = message.chat.id
+    markup = InlineKeyboardMarkup()
+    for code, name in languages.items():
+        markup.add(InlineKeyboardButton(name, callback_data=f"lang_{code}"))
+    bot.send_message(cid, t("choose_lang", cid), parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_menu(call):
+    cid = call.message.chat.id
+    data = call.data
+
+    if data.startswith("lang_"):
+        user_langs[cid] = data.split("_")[1]
+        welcome(call.message)
+
+    elif data in ["phase1", "phase2"]:
+        bot.send_message(cid, t("phase_selected", cid).format(phase=data.upper()), parse_mode='Markdown')
+
+    elif data == "info":
+        info = "📘 *ChartLess Strategy™ Info:*\n_This strategy is based on phase-based structure, TP/SL gap logic, and backup recovery zone. It helps you trade with structure, not noise._"
+        back = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Back", callback_data='back'))
+        bot.edit_message_text(info, cid, call.message.message_id, parse_mode='Markdown', reply_markup=back)
+
+    elif data == "list":
+        instruments = "\n".join(f"– {v['icon']} {k.upper()}" for k, v in instrument_data.items())
+        back = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Back", callback_data='back'))
+        bot.edit_message_text(f"📊 *Available Instruments:*\n{instruments}", cid, call.message.message_id, parse_mode='Markdown', reply_markup=back)
+
+    elif data == "usage":
+        usage(call.message)
+
+    elif data == "back":
+        welcome(call.message)
+
+def welcome(message):
+    cid = message.chat.id
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("📘 Strategy Info", callback_data='info'),
+        InlineKeyboardButton("📊 Instruments", callback_data='list')
+    )
+    markup.row(
+        InlineKeyboardButton("🧮 View Your Usage", callback_data='usage'),
+        InlineKeyboardButton("🌀 Phase 1", callback_data='phase1'),
+        InlineKeyboardButton("🔁 Phase 2", callback_data='phase2')
+    )
+    markup.row(
+        InlineKeyboardButton("📞 Contact Admin", url="https://t.me/PhoenixFx001")
+    )
+    bot.send_message(cid, t("welcome", cid) + "\n\n" + t("send_format", cid), parse_mode='Markdown', reply_markup=markup)
+
+# === 6. Signal Logic ===
+@bot.message_handler(func=lambda m: True)
+def handle(message):
+    cid = message.chat.id
+    if not is_allowed(cid):
+        bot.reply_to(message, "🔒 *Trial ended.* You’ve used 3 signals or 3 days.\nTo unlock full access, contact admin: @PhoenixFx001", parse_mode='Markdown')
+        return
+
+    try:
+        parts = [x.strip().lower() for x in message.text.strip().split(",")]
+        if len(parts) != 4:
+            raise ValueError(t("error_format", cid))
+
+        inst, high, low, curr = parts[0], float(parts[1]), float(parts[2]), float(parts[3])
+        if inst not in instrument_data:
+            raise ValueError(t("not_found", cid))
+
+        tp_gap = instrument_data[inst]["tp"]
+        sl_gap = instrument_data[inst]["sl"]
+        entry = round((high + low + curr) / 3, 4)
+        direction = "Buy" if curr > entry else "Sell"
+        quote = "_“Discipline is the bridge between goals and trading success.”_"
+
+        if direction == "Buy":
+            tp = round(entry + tp_gap, 4)
+            sl = round(entry - sl_gap, 4)
+            backup = round(high + sl_gap, 4)
+            entry_zone = f"`{round(entry - sl_gap, 4)} ➔ {entry}`"
+            status = "🟢 *Entry Valid*" if curr >= (entry - sl_gap) else "⏳ *Waiting for Entry Zone*"
+        else:
+            tp = round(entry - tp_gap, 4)
+            sl = round(entry + sl_gap, 4)
+            backup = round(low - sl_gap, 4)
+            entry_zone = f"`{entry} ➔ {round(entry + sl_gap, 4)}`"
+            status = "🟢 *Entry Valid*" if curr <= (entry + sl_gap) else "⏳ *Waiting for Entry Zone*"
+
+        rr = round(tp_gap / sl_gap, 2)
+        icon = instrument_data[inst]["icon"]
+
+        msg = f"""
+{icon} *ChartLess Strategy – {inst.upper()}*
+
+🔹 *Entry Price:* `{entry}`
+🔹 *Direction:* *`{direction}`*
+📅 *Entry Zone:* {entry_zone}
+{status}
+
+🌟 *TP:* `{tp}`
+🛡 *SL:* `{sl}`
+⚖️ *R:R:* *`1:{rr}`*
+
+🔁 *Backup Entry:* `{backup}` (same direction)
+
+🧠 *Logic:* _Entry valid within 48hrs. If SL hits, re-enter if price returns in 3 days._
+
+💬 {quote}
+*_By Phoenix FX – ChartLess Trading™_*
+"""
+        bot.reply_to(message, msg, parse_mode='Markdown')
+
+    except Exception as e:
+        bot.reply_to(message, str(e))
+
+# === 7. /usage & /approve ===
+@bot.message_handler(commands=['usage'])
+def usage(message):
+    cid = message.chat.id
+    user = user_access.get(cid)
+    if not user:
+        bot.reply_to(message, "🧮 No usage data yet. Start by using a signal.")
+        return
+
+    days_used = (time.time() - user['start_time']) / (60 * 60 * 24)
+    days_left = max(0, ACCESS_LIMIT_DAYS - int(days_used))
+    signals_left = max(0, ACCESS_LIMIT_SIGNALS - user['count'])
+    status = "✅ Premium User" if user.get("premium") else "🧪 Trial User"
+
+    bot.reply_to(message, f"""
+🧮 *Your Usage Summary:*
+• Status: {status}
+• Signals left: `{signals_left}`
+• Days left: `{days_left}`
+
+🔑 To unlock Premium, contact @PhoenixFx001
+""", parse_mode='Markdown')
+
+@bot.message_handler(commands=['approve'])
+def approve_user(message):
+    cid = message.chat.id
+    if cid not in admin_ids:
+        bot.reply_to(message, "⛔️ You’re not allowed to use this command.")
+        return
+
+    try:
+        parts = message.text.strip().split()
+        if len(parts) != 2:
+            raise Exception("Usage: /approve USER_ID")
+
+        target = int(parts[1])
+        user_access[target] = user_access.get(target, {})
+        user_access[target].update({'premium': True, 'start_time': 0, 'count': 0, 'notified': False})
+        bot.reply_to(message, f"✅ User {target} is now Premium.")
+        bot.send_message(target, "🎉 You have been granted *Premium Access!* Enjoy unlimited usage.", parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Error: {str(e)}")
+
+# === 8. Flask Web Server ===
+app = Flask('')
+@app.route('/')
+def home():
+    return "ChartLess Bot is alive!"
+
+@app.route('/' + TOKEN, methods=['POST'])
+def getMessage():
+    bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
+    return "OK", 200
+
+def run(): app.run(host='0.0.0.0', port=8080)
+def keep_alive(): threading.Thread(target=run).start()
+
+# === 9. Launch ===
+keep_alive()
+bot.infinity_polling()
